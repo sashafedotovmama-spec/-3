@@ -12,6 +12,9 @@ logging.basicConfig(
 # Токен бота (замените на свой)
 BOT_TOKEN = "8908126962:AAEHJySFXe289oH3SXuYXdRgeaqEgvg7LWM"
 
+# Время на принятие правил (в секундах)
+TIME_TO_ACCEPT = 80  # ← ИЗМЕНЕНО НА 80 СЕКУНД
+
 # Текст правил
 RULES_TEXT = """
 📜 *ПРАВИЛА ЧАТА*
@@ -55,12 +58,12 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: i
         logging.error(f"❌ Ошибка при кике пользователя {user_id}: {e}")
         return False
 
-# Функция для автоматического кика через 15 секунд
+# Функция для автоматического кика через 80 секунд
 async def auto_kick_after_delay(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message_id: int):
-    """Автоматически кикает пользователя через 15 секунд, если он не согласился"""
+    """Автоматически кикает пользователя через 80 секунд, если он не согласился"""
     try:
-        # Ждем 15 секунд
-        await asyncio.sleep(15)
+        # Ждем 80 секунд
+        await asyncio.sleep(TIME_TO_ACCEPT)
         
         # Проверяем, не согласился ли пользователь за это время
         if user_id in user_agreements and not user_agreements[user_id].get('agreed', False):
@@ -69,14 +72,14 @@ async def auto_kick_after_delay(context: ContextTypes.DEFAULT_TYPE, chat_id: int
                 context=context,
                 chat_id=chat_id,
                 user_id=user_id,
-                reason="Не принял правила в течение 15 секунд"
+                reason=f"Не принял правила в течение {TIME_TO_ACCEPT} секунд"
             )
             
             if kick_success:
                 # Отправляем уведомление в чат
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"🔨 Пользователь был удалён из чата за отказ от принятия правил в течение 15 секунд.",
+                    text=f"🔨 Пользователь был удалён из чата за отказ от принятия правил в течение {TIME_TO_ACCEPT} секунд.",
                     parse_mode='HTML'
                 )
                 
@@ -92,6 +95,8 @@ async def auto_kick_after_delay(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         elif user_id in user_agreements and user_agreements[user_id].get('agreed', False):
             logging.info(f"✅ Пользователь {user_id} согласился с правилами, кик отменён")
             
+    except asyncio.CancelledError:
+        logging.info(f"⏰ Таймер для пользователя {user_id} отменён (пользователь согласился)")
     except Exception as e:
         logging.error(f"Ошибка в auto_kick_after_delay: {e}")
 
@@ -120,12 +125,12 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Отправляем правила новому участнику
         sent_message = await update.message.reply_text(
             f"👋 Добро пожаловать, {member.first_name}!\n\n{RULES_TEXT}\n\n"
-            f"⏰ У вас есть 15 секунд, чтобы принять правила!",
+            f"⏰ У вас есть {TIME_TO_ACCEPT} секунд, чтобы принять правила!",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
         
-        # Запускаем таймер на кик через 15 секунд
+        # Запускаем таймер на кик через 80 секунд
         task = asyncio.create_task(
             auto_kick_after_delay(
                 context=context,
@@ -250,7 +255,7 @@ async def check_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"⚠️ {update.effective_user.mention_html()}, вы не можете писать в чат, пока не примете правила!\n"
-                     f"У вас есть 15 секунд, чтобы нажать кнопку \"✅ Согласен\".",
+                     f"У вас есть {TIME_TO_ACCEPT} секунд, чтобы нажать кнопку \"✅ Согласен\".",
                 parse_mode='HTML'
             )
             
@@ -281,12 +286,12 @@ async def check_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         sent_message = await context.bot.send_message(
             chat_id=chat_id,
             text=f"👋 {update.effective_user.mention_html()}, вы не приняли правила чата!\n\n{RULES_TEXT}\n\n"
-                 f"⏰ У вас есть 15 секунд, чтобы принять правила!",
+                 f"⏰ У вас есть {TIME_TO_ACCEPT} секунд, чтобы принять правила!",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
         
-        # Запускаем таймер на кик через 15 секунд
+        # Запускаем таймер на кик через 80 секунд
         task = asyncio.create_task(
             auto_kick_after_delay(
                 context=context,
@@ -313,7 +318,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Приветствую новых участников\n"
         "• Показываю правила чата\n"
         "• Запрашиваю согласие с правилами\n"
-        "• ⏰ Кикаю через 15 секунд, если не принял правила\n"
+        f"• ⏰ Кикаю через {TIME_TO_ACCEPT} секунд, если не принял правила\n"
         "• 🔨 Удаляю тех, кто отказался\n"
         "• 🛡️ Блокирую сообщения от тех, кто не принял правила\n\n"
         "🔧 *Как использовать:*\n"
@@ -356,7 +361,7 @@ async def check_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user = await context.bot.get_chat(uid)
             name = user.full_name or user.username or str(uid)
-            status = "✅ Согласился" if data.get('agreed', False) else "❌ Не согласился (будет кикнут)"
+            status = "✅ Согласился" if data.get('agreed', False) else f"❌ Не согласился (будет кикнут через {TIME_TO_ACCEPT} сек)"
             text += f"• {name} — {status}\n"
         except:
             text += f"• ID {uid} — {data.get('agreed', False)}\n"
@@ -417,7 +422,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Всего участников на рассмотрении: {total}\n"
         f"✅ Согласились: {agreed}\n"
         f"❌ Не согласились (будут кикнуты): {declined}\n\n"
-        f"⏰ Время на принятие правил: 15 секунд"
+        f"⏰ Время на принятие правил: {TIME_TO_ACCEPT} секунд"
     )
     
     await update.message.reply_text(stats_text, parse_mode='Markdown')
@@ -444,7 +449,7 @@ def main():
     print("     ✅ Отправка сообщений")
     print("     ✅ Удаление сообщений")
     print("     ✅ Блокировка пользователей (ЭТО ВАЖНО ДЛЯ КИКА!)")
-    print("\n⏰ Бот будет кикать через 15 секунд, если пользователь не принял правила!")
+    print(f"\n⏰ Бот будет кикать через {TIME_TO_ACCEPT} секунд, если пользователь не принял правила!")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
