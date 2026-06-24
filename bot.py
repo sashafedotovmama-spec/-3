@@ -29,6 +29,8 @@ RULES_TEXT = """
 
 # Словарь для отслеживания статуса пользователей
 user_agreements = {}
+# Словарь для хранения задач на кик
+kick_tasks = {}
 
 # Функция для кика пользователя
 async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, reason: str = "Нарушение правил"):
@@ -53,6 +55,46 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: i
         logging.error(f"❌ Ошибка при кике пользователя {user_id}: {e}")
         return False
 
+# Функция для автоматического кика через 15 секунд
+async def auto_kick_after_delay(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, message_id: int):
+    """Автоматически кикает пользователя через 15 секунд, если он не согласился"""
+    try:
+        # Ждем 15 секунд
+        await asyncio.sleep(15)
+        
+        # Проверяем, не согласился ли пользователь за это время
+        if user_id in user_agreements and not user_agreements[user_id].get('agreed', False):
+            # Пользователь не согласился - кикаем
+            kick_success = await kick_user(
+                context=context,
+                chat_id=chat_id,
+                user_id=user_id,
+                reason="Не принял правила в течение 15 секунд"
+            )
+            
+            if kick_success:
+                # Отправляем уведомление в чат
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🔨 Пользователь был удалён из чата за отказ от принятия правил в течение 15 секунд.",
+                    parse_mode='HTML'
+                )
+                
+                # Удаляем пользователя из словаря
+                if user_id in user_agreements:
+                    del user_agreements[user_id]
+                
+                # Удаляем задачу на кик
+                if user_id in kick_tasks:
+                    del kick_tasks[user_id]
+                    
+        # Если пользователь согласился, задача сама завершится
+        elif user_id in user_agreements and user_agreements[user_id].get('agreed', False):
+            logging.info(f"✅ Пользователь {user_id} согласился с правилами, кик отменён")
+            
+    except Exception as e:
+        logging.error(f"Ошибка в auto_kick_after_delay: {e}")
+
 # Обработчик новых участников
 async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, есть ли новые участники
@@ -76,11 +118,23 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Отправляем правила новому участнику
-        await update.message.reply_text(
-            f"👋 Добро пожаловать, {member.first_name}!\n\n{RULES_TEXT}",
+        sent_message = await update.message.reply_text(
+            f"👋 Добро пожаловать, {member.first_name}!\n\n{RULES_TEXT}\n\n"
+            f"⏰ У вас есть 15 секунд, чтобы принять правила!",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+        
+        # Запускаем таймер на кик через 15 секунд
+        task = asyncio.create_task(
+            auto_kick_after_delay(
+                context=context,
+                chat_id=update.effective_chat.id,
+                user_id=member.id,
+                message_id=sent_message.message_id
+            )
+        )
+        kick_tasks[member.id] = task
 
 # Обработчик нажатия на кнопку
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,6 +158,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_agreements[user_id]['agreed'] = True
         else:
             user_agreements[user_id] = {'agreed': True, 'joined_time': query.message.date.timestamp()}
+        
+        # Отменяем задачу на кик, если она есть
+        if user_id in kick_tasks:
+            kick_tasks[user_id].cancel()
+            del kick_tasks[user_id]
+            logging.info(f"✅ Задача на кик отменена для пользователя {user_id}")
             
         await query.edit_message_text(
             f"✅ *Спасибо, {query.from_user.first_name}! Вы приняли правила.*\n\n"
@@ -127,6 +187,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_agreements[user_id]['agreed'] = False
         else:
             user_agreements[user_id] = {'agreed': False, 'joined_time': query.message.date.timestamp()}
+        
+        # Отменяем задачу на кик, если она есть
+        if user_id in kick_tasks:
+            kick_tasks[user_id].cancel()
+            del kick_tasks[user_id]
         
         # Сначала показываем сообщение об отказе
         await query.edit_message_text(
@@ -152,11 +217,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML'
             )
             
-            # Удаляем пользователя из словаря, чтобы не отслеживать его
+            # Удаляем пользователя из словаря
             if user_id in user_agreements:
                 del user_agreements[user_id]
 
-# НОВЫЙ ОБРАБОТЧИК: Проверка сообщений от новых участников
+# Обработчик сообщений (проверка, принял ли пользователь правила)
 async def check_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверяет, принял ли пользователь правила перед отправкой сообщения"""
     user_id = update.effective_user.id
@@ -181,57 +246,17 @@ async def check_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logging.error(f"Ошибка при удалении сообщения: {e}")
             
-            # Отправляем предупреждение
-            warning_text = (
-                f"⚠️ *{update.effective_user.first_name}, вы не можете писать в чат, пока не примете правила!*\n\n"
-                f"Пожалуйста, нажмите кнопку \"✅ Согласен\" в сообщении с правилами.\n"
-                f"Если вы не видите сообщение с правилами, напишите админу."
-            )
-            
-            # Отправляем предупреждение в ЛС
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=warning_text,
-                    parse_mode='Markdown'
-                )
-            except:
-                pass
-            
-            # Отправляем предупреждение в чат (для админов)
+            # Отправляем предупреждение в чат
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ Пользователь {update.effective_user.mention_html()} пытался писать, но не принял правила.\n"
-                     f"Сообщение удалено.",
+                text=f"⚠️ {update.effective_user.mention_html()}, вы не можете писать в чат, пока не примете правила!\n"
+                     f"У вас есть 15 секунд, чтобы нажать кнопку \"✅ Согласен\".",
                 parse_mode='HTML'
             )
-            
-            # ДАЁМ ШАНС: ждём 30 секунд, если пользователь не согласится - кикаем
-            await asyncio.sleep(30)
-            
-            # Проверяем, согласился ли пользователь за это время
-            if user_id in user_agreements and not user_agreements[user_id].get('agreed', False):
-                # Кикаем пользователя
-                kick_success = await kick_user(
-                    context=context,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    reason="Попытка писать без принятия правил"
-                )
-                
-                if kick_success:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🔨 Пользователь {update.effective_user.mention_html()} был удалён из чата за попытку писать без принятия правил.",
-                        parse_mode='HTML'
-                    )
-                    if user_id in user_agreements:
-                        del user_agreements[user_id]
             
             return
     
     # Если пользователя нет в словаре - возможно, он присоединился до бота
-    # Добавляем его и просим принять правила
     else:
         user_agreements[user_id] = {
             'agreed': False,
@@ -253,12 +278,24 @@ async def check_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await context.bot.send_message(
+        sent_message = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"👋 {update.effective_user.mention_html()}, вы не приняли правила чата!\n\n{RULES_TEXT}",
+            text=f"👋 {update.effective_user.mention_html()}, вы не приняли правила чата!\n\n{RULES_TEXT}\n\n"
+                 f"⏰ У вас есть 15 секунд, чтобы принять правила!",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+        
+        # Запускаем таймер на кик через 15 секунд
+        task = asyncio.create_task(
+            auto_kick_after_delay(
+                context=context,
+                chat_id=chat_id,
+                user_id=user_id,
+                message_id=sent_message.message_id
+            )
+        )
+        kick_tasks[user_id] = task
 
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -276,9 +313,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Приветствую новых участников\n"
         "• Показываю правила чата\n"
         "• Запрашиваю согласие с правилами\n"
+        "• ⏰ Кикаю через 15 секунд, если не принял правила\n"
         "• 🔨 Удаляю тех, кто отказался\n"
-        "• 🛡️ Блокирую сообщения от тех, кто не принял правила\n"
-        "• ⏰ Даю 30 секунд на принятие правил, затем кикаю\n\n"
+        "• 🛡️ Блокирую сообщения от тех, кто не принял правила\n\n"
         "🔧 *Как использовать:*\n"
         "1. Добавьте меня в группу\n"
         "2. Сделайте меня администратором с правами:\n"
@@ -319,7 +356,7 @@ async def check_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             user = await context.bot.get_chat(uid)
             name = user.full_name or user.username or str(uid)
-            status = "✅ Согласился" if data.get('agreed', False) else "❌ Не согласился"
+            status = "✅ Согласился" if data.get('agreed', False) else "❌ Не согласился (будет кикнут)"
             text += f"• {name} — {status}\n"
         except:
             text += f"• ID {uid} — {data.get('agreed', False)}\n"
@@ -379,7 +416,8 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 *Статистика принятия правил*\n\n"
         f"👥 Всего участников на рассмотрении: {total}\n"
         f"✅ Согласились: {agreed}\n"
-        f"❌ Не согласились (будут кикнуты при попытке писать): {declined}"
+        f"❌ Не согласились (будут кикнуты): {declined}\n\n"
+        f"⏰ Время на принятие правил: 15 секунд"
     )
     
     await update.message.reply_text(stats_text, parse_mode='Markdown')
@@ -396,7 +434,6 @@ def main():
     application.add_handler(CommandHandler("check", check_users))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler))
     application.add_handler(CallbackQueryHandler(button_callback))
-    # НОВЫЙ ОБРАБОТЧИК: проверяет все текстовые сообщения
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_message_handler))
 
     print("🤖 Бот запущен и готов к работе в группах...")
@@ -407,9 +444,7 @@ def main():
     print("     ✅ Отправка сообщений")
     print("     ✅ Удаление сообщений")
     print("     ✅ Блокировка пользователей (ЭТО ВАЖНО ДЛЯ КИКА!)")
-    print("\n🛡️ Теперь бот будет:")
-    print("  • Удалять сообщения от тех, кто не принял правила")
-    print("  • Кикать после 30 секунд, если пользователь не согласился")
+    print("\n⏰ Бот будет кикать через 15 секунд, если пользователь не принял правила!")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
